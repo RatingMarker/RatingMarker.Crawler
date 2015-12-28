@@ -1,0 +1,124 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Timers;
+using Autofac;
+using Autofac.Extras.NLog;
+using RatingMarker.Crawler.Models;
+using RatingMarker.Crawler.Workflow.Services;
+
+namespace RatingMarker.Crawler.Workflow
+{
+    public class CrawlerManage: IDisposable
+    {
+        private readonly ILogger logger;
+        private readonly AutofacContainerFactory autofacContainerFactory;
+        private readonly IStorageService storageService;
+        private readonly Timer timer;
+        private bool isProcessing;
+
+        public CrawlerManage(IStorageService storageService, ILogger logger, AutofacContainerFactory autofacContainerFactory)
+        {
+            this.storageService = storageService;
+            this.logger = logger;
+            this.autofacContainerFactory = autofacContainerFactory;
+            this.timer = new Timer()
+            {
+                Enabled = true,
+                Interval = 600000,
+                AutoReset = true,
+            };
+        }
+
+        public void Dispose()
+        {
+            if (timer != null)
+            {
+                timer.Stop();
+                timer.Dispose();
+            }
+        }
+
+        public void InitializeCrawler()
+        {
+            ProcessingCrawler();
+
+            this.timer.Elapsed += TimerOnElapsed;
+
+            this.timer.Start();
+        }
+
+        private void TimerOnElapsed(object sender, ElapsedEventArgs elapsedEventArgs)
+        {
+            if (!isProcessing)
+            {
+                ProcessingCrawler();
+            }
+        }
+
+        public void ProcessingCrawler()
+        {
+            isProcessing = true;
+
+            logger.Info("Начата работа краулера");
+
+            var container = autofacContainerFactory.Build();
+
+            IEnumerable<Page> pages = storageService.GetManyPages(x => x.LastScanDate == null);
+
+            Queue<Page> newPages = new Queue<Page>(pages);
+
+            while (newPages.Any())
+            {
+                var page = newPages.Dequeue();
+
+                using (var scope = container.BeginLifetimeScope())
+                {
+                    var processing = scope.ResolveOptional<CrawlerProcessing>();
+
+                    logger.Info("Inittialize procesion new page: " + page.Uri);
+
+                    processing.InitializeProcession(page);
+
+                    logger.Info("Completed procession new page: " + page.Uri);
+                }
+
+                if (!newPages.Any())
+                {
+                    pages = storageService.GetManyPages(x => x.LastScanDate == null);
+                    newPages = new Queue<Page>(pages);
+                }
+            }
+
+            pages = storageService.GetManyPages(x => x.LastScanDate < DateTime.Today.AddDays(-1));
+
+            Queue<Page> oldPages = new Queue<Page>(pages);
+
+            while (oldPages.Any())
+            {
+                var page = oldPages.Dequeue();
+
+                using (var scope = container.BeginLifetimeScope())
+                {
+                    var processing = scope.ResolveOptional<CrawlerProcessing>();
+
+                    logger.Info("Inittialize procesion old page: " + page.Uri);
+
+                    processing.InitializeProcession(page);
+
+                    logger.Info("Completed procession old page: " + page.Uri);
+                }
+
+                if (!oldPages.Any())
+                {
+                    pages = storageService.GetManyPages(x => x.LastScanDate == null);
+                    oldPages = new Queue<Page>(pages);
+                }
+            }
+
+            isProcessing = false;
+
+            logger.Info("Работа краулера завершена");
+        }
+    }
+}
